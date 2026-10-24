@@ -16,8 +16,9 @@
     const fbKey = k => String(k).replace(/[.#$\[\]\/]/g, "_");
     const LS = window.localStorage;
     const rawSet = Storage.prototype.setItem;
+    const HOLD_MS = 3500;          // wait this long before taking the other device's numbers
     const wroteAt = {};
-    let applying = false;
+    let quiet = false;             // true = change this device only, don't send it
 
     // 1) load the shared numbers before the overlay starts
     try {
@@ -34,34 +35,47 @@
     Storage.prototype.setItem = function (k, v) {
       const old = this.getItem(k);
       rawSet.call(this, k, v);
-      if (this === LS && !applying && isSynced(k) && old !== String(v)) {
+      if (this === LS && !quiet && isSynced(k) && old !== String(v)) {
         wroteAt[k] = Date.now();
         fetch(base + "/state/" + fbKey(k) + ".json", { method: "PUT", body: JSON.stringify(String(v)) }).catch(() => {});
       }
     };
 
-    // 3) when the other device changes something, take it and redraw
-    let reloadT = null;
-    function applyRemote(k, v) {
+    // 3) take the other device's changes (after a short hold, so a sub this device is
+    //    also about to get isn't counted twice) and redraw in place - no reload
+    const pending = {};
+    let flushT = null;
+    function flush() {
+      flushT = null;
+      let changed = false;
+      for (const k in pending) {
+        const v = pending[k]; delete pending[k];
+        if (Date.now() - (wroteAt[k] || 0) < HOLD_MS) continue;   // we just changed it ourselves
+        if (LS.getItem(k) === v) continue;
+        quiet = true; try { LS.setItem(k, v); } finally { quiet = false; }
+        changed = true;
+      }
+      if (changed && window.__syncRefresh) window.__syncRefresh();
+    }
+    function queueRemote(k, v) {
       if (!isSynced(k) || typeof v !== "string") return;
-      if (Date.now() - (wroteAt[k] || 0) < 3000) return;   // our own write echoing back
-      if (LS.getItem(k) === v) return;
-      applying = true; try { LS.setItem(k, v); } finally { applying = false; }
-      clearTimeout(reloadT); reloadT = setTimeout(() => location.reload(), 400);
+      pending[k] = v;
+      if (!flushT) flushT = setTimeout(flush, HOLD_MS);
     }
     try {
       const es = new EventSource(base + "/state.json");
       const onMsg = ev => {
         let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
         if (!d || typeof d.path !== "string") return;
-        if (d.path === "/") { if (d.data && typeof d.data === "object") for (const k in d.data) applyRemote(k, d.data[k]); }
-        else if (d.path.split("/").length === 2) applyRemote(d.path.slice(1), d.data);
+        if (d.path === "/") { if (d.data && typeof d.data === "object") for (const k in d.data) queueRemote(k, d.data[k]); }
+        else if (d.path.split("/").length === 2) queueRemote(d.path.slice(1), d.data);
       };
       es.addEventListener("put", onMsg);
       es.addEventListener("patch", onMsg);
     } catch (e) {}
 
-    // 4) count each Streamlabs event only once, even if both devices are live
+    // 4) each Streamlabs event counts once. If the other device got it first, this device
+    //    still plays the animation but doesn't send the count again.
     window.__syncOnce = function (e, handle) {
       const m = e && (Array.isArray(e.message) ? e.message[0] : e.message);
       const id = (e && e.event_id) || (m && (m._id || m.id || m.event_id));
@@ -70,8 +84,12 @@
         method: "PUT",
         headers: { "X-Firebase-ETag": "true", "if-match": "null_etag" },
         body: String(Date.now())
-      }).then(r => { if (r.status !== 412) handle(e); })   // 412 = the other device already counted it
-        .catch(() => handle(e));
+      }).then(async r => {
+        if (r.status !== 412) return handle(e);              // first to see it: count + animate
+        let t = 0; try { t = parseInt(await r.text(), 10) || 0; } catch (x) {}
+        if (Date.now() - t > HOLD_MS - 500) return;           // other device's numbers already applied here
+        quiet = true; try { handle(e); } finally { quiet = false; }   // animate, same result, don't resend
+      }).catch(() => handle(e));
     };
   })();
 </script>
@@ -451,6 +469,16 @@
     t.classList.remove("remind"); void t.offsetWidth; t.classList.add("remind");
     setTimeout(() => t.classList.remove("remind"), 1600);
   }, 1000);
+
+  // ---------- redraw after the other device (sync) changes the numbers ----------
+  window.__syncRefresh = () => {
+    deadline = store.get("ovl_train_deadline", deadline);
+    lastSubAt = store.get("ovl_last_sub_at", lastSubAt);
+    $("lastSub").textContent = store.get("ovl_lastSub", "—");
+    $("lastDono").textContent = store.get("ovl_lastDono", "—");
+    renderSubs();
+    trainTick();
+  };
 
   // ---------- Streamlabs socket ----------
   const money = m => m.formatted_amount || m.formattedAmount ||
