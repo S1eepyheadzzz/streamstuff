@@ -188,10 +188,19 @@
   };
 
   // ---------- scale to canvas size ----------
-  const k = (parseInt(params.get("w"), 10) || CONFIG.CANVAS_WIDTH) / 1920;
-  document.body.style.width = 1920 * k + "px";
-  document.body.style.height = 80 * k + "px";
-  document.querySelector(".bar").style.transform = `scale(${k})`;
+  let k = (parseInt(params.get("w"), 10) || window.innerWidth || CONFIG.CANVAS_WIDTH) / 1920;
+  function applyScale() {
+    document.body.style.width = 1920 * k + "px";
+    document.body.style.height = 80 * k + "px";
+    document.querySelector(".bar").style.transform = `scale(${k})`;
+  }
+  applyScale();
+  if (!params.get("w")) {
+    window.addEventListener("resize", () => {
+      k = (window.innerWidth || CONFIG.CANVAS_WIDTH) / 1920;
+      applyScale();
+    });
+  }
 
   // ---------- sponsor ----------
   const sp = $("sponsor");
