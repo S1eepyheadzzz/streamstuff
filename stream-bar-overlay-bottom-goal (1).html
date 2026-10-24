@@ -3,6 +3,78 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+  // ---------- cross-device sync (Firebase) ----------
+  // Add &sync=YOUR_CODE to the link on every device (phone + desktop) that should share
+  // the sub count, sub train timer, last sub and last dono. No sync code = works like before.
+  (function () {
+    const p = new URLSearchParams(location.search);
+    const room = p.get("sync");
+    if (!room || room.length < 20 || p.get("demo") === "1") return;
+    const base = "https://sleepyheadzzz-overlay-default-rtdb.firebaseio.com/rooms/" + encodeURIComponent(room);
+    const isSynced = k => /^ovl_/.test(k);
+    const fbKey = k => String(k).replace(/[.#$\[\]\/]/g, "_");
+    const LS = window.localStorage;
+    const rawSet = Storage.prototype.setItem;
+    const wroteAt = {};
+    let applying = false;
+
+    // 1) load the shared numbers before the overlay starts
+    try {
+      const x = new XMLHttpRequest();
+      x.open("GET", base + "/state.json", false);
+      x.send();
+      if (x.status === 200) {
+        const st = JSON.parse(x.responseText) || {};
+        for (const k in st) if (isSynced(k) && typeof st[k] === "string") rawSet.call(LS, k, st[k]);
+      }
+    } catch (e) {}
+
+    // 2) send every change on this device to the shared copy
+    Storage.prototype.setItem = function (k, v) {
+      const old = this.getItem(k);
+      rawSet.call(this, k, v);
+      if (this === LS && !applying && isSynced(k) && old !== String(v)) {
+        wroteAt[k] = Date.now();
+        fetch(base + "/state/" + fbKey(k) + ".json", { method: "PUT", body: JSON.stringify(String(v)) }).catch(() => {});
+      }
+    };
+
+    // 3) when the other device changes something, take it and redraw
+    let reloadT = null;
+    function applyRemote(k, v) {
+      if (!isSynced(k) || typeof v !== "string") return;
+      if (Date.now() - (wroteAt[k] || 0) < 3000) return;   // our own write echoing back
+      if (LS.getItem(k) === v) return;
+      applying = true; try { LS.setItem(k, v); } finally { applying = false; }
+      clearTimeout(reloadT); reloadT = setTimeout(() => location.reload(), 400);
+    }
+    try {
+      const es = new EventSource(base + "/state.json");
+      const onMsg = ev => {
+        let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+        if (!d || typeof d.path !== "string") return;
+        if (d.path === "/") { if (d.data && typeof d.data === "object") for (const k in d.data) applyRemote(k, d.data[k]); }
+        else if (d.path.split("/").length === 2) applyRemote(d.path.slice(1), d.data);
+      };
+      es.addEventListener("put", onMsg);
+      es.addEventListener("patch", onMsg);
+    } catch (e) {}
+
+    // 4) count each Streamlabs event only once, even if both devices are live
+    window.__syncOnce = function (e, handle) {
+      const m = e && (Array.isArray(e.message) ? e.message[0] : e.message);
+      const id = (e && e.event_id) || (m && (m._id || m.id || m.event_id));
+      if (!id) return handle(e);
+      fetch(base + "/seen/" + fbKey(id) + ".json", {
+        method: "PUT",
+        headers: { "X-Firebase-ETag": "true", "if-match": "null_etag" },
+        body: String(Date.now())
+      }).then(r => { if (r.status !== 412) handle(e); })   // 412 = the other device already counted it
+        .catch(() => handle(e));
+    };
+  })();
+</script>
 <title>Stream Bar Overlay Goal Bottom</title>
 <!--
   ============================================================
@@ -453,7 +525,7 @@
   const token = params.get("token") || CONFIG.SOCKET_TOKEN;
   if (token && !token.startsWith("PASTE_") && window.io) {
     const socket = io(`https://sockets.streamlabs.com?token=${token}`, { transports: ["websocket"] });
-    socket.on("event", handle);
+    socket.on("event", e => (window.__syncOnce ? window.__syncOnce(e, handle) : handle(e)));
   }
 
   // ---------- demo mode ----------
