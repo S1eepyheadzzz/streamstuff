@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overlay Reset</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0e0f13; color: #e8e8ee; font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .card { width: min(380px, calc(100vw - 32px)); background: #181a21; border: 1px solid #2a2d38; border-radius: 14px; padding: 22px; }
+  h1 { margin: 0 0 14px; font-size: 20px; }
+  label { display: flex; align-items: center; gap: 10px; padding: 8px 0; cursor: pointer; }
+  input[type=checkbox] { width: 18px; height: 18px; accent-color: #8b5cf6; }
+  button { margin-top: 14px; width: 100%; padding: 14px; font: inherit; font-weight: 700; color: #fff; background: #8b5cf6; border: 0; border-radius: 10px; cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  #status { margin-top: 12px; min-height: 1.4em; font-size: 14px; color: #a7a9b6; }
+  #status.ok { color: #4ade80; } #status.err { color: #f87171; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Reset stream bar</h1>
+  <label><input type="checkbox" id="subs" checked> Sub count → 0</label>
+  <label><input type="checkbox" id="timer" checked> Sub train timer → full 60 min</label>
+  <label><input type="checkbox" id="lastSub" checked> Latest sub → —</label>
+  <label><input type="checkbox" id="lastDono" checked> Last dono → —</label>
+  <button id="go">Reset</button>
+  <div id="status"></div>
+</div>
+<script>
+  const TRAIN_MINUTES = 60;
+  const p = new URLSearchParams(location.search);
+  const room = p.get("sync");
+  const statusEl = document.getElementById("status");
+  const btn = document.getElementById("go");
+  const say = (msg, cls) => { statusEl.textContent = msg; statusEl.className = cls || ""; };
+
+  if (!room || room.length < 20) {
+    btn.disabled = true;
+    say("Missing ?sync=YOUR_CODE in the link.", "err");
+  }
+  const base = "https://sleepyheadzzz-overlay-default-rtdb.firebaseio.com/rooms/" + encodeURIComponent(room || "") + "/state/";
+
+  // The overlays store each value JSON-encoded in localStorage, and the sync stores that string as-is.
+  const put = (key, value) =>
+    fetch(base + key + ".json", { method: "PUT", body: JSON.stringify(JSON.stringify(value)) })
+      .then(r => { if (!r.ok) throw new Error(key + ": HTTP " + r.status); });
+
+  async function reset() {
+    const now = Date.now();
+    const jobs = [];
+    if (document.getElementById("subs").checked) {
+      jobs.push(put("ovl_train_subs", 0), put("ovl_last_sub_at", now));
+    }
+    if (document.getElementById("timer").checked) jobs.push(put("ovl_train_deadline", now + TRAIN_MINUTES * 60e3));
+    if (document.getElementById("lastSub").checked) jobs.push(put("ovl_lastSub", "—"));
+    if (document.getElementById("lastDono").checked) jobs.push(put("ovl_lastDono", "—"));
+    if (!jobs.length) return say("Nothing selected.", "err");
+    btn.disabled = true;
+    say("Resetting…");
+    try {
+      await Promise.all(jobs);
+      say("Done — overlays update within a few seconds.", "ok");
+    } catch (e) {
+      say("Failed: " + e.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  btn.addEventListener("click", reset);
+  if (room && room.length >= 20 && p.get("go") === "1") reset();
+</script>
+</body>
+</html>
